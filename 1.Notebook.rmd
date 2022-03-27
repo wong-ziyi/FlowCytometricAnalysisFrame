@@ -1,0 +1,766 @@
+---
+title: "Flow Cytometry Analysis"
+author: "`r paste0('  ','Author', ': ',Sys.getenv('USERNAME'))`"
+date: "`r paste0('  ','Date', ': ', format(Sys.time(), '%d %B %Y'))`"
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    css: ./HTML_source/style.css
+---
+
+This protocl was modified from [HERE](https://jchellmuth.com/posts/FACS-with-R/).
+
+## 00.Setting R Enviroment {.tabset .tabset-fade}
+
+### 1.Installation & Loading Packages
+
+```{r}
+if (!require(cytolib)) remotes::install_github("RGLab/cytolib")
+list.of.packages <- c("tidyverse","BH","data.table")
+list.of.packages.Bio <- c("flowCore","ggcyto","flowStats","flowWorkspace","openCyto")
+#Packages that does not install yet
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[, "Package"])]
+new.packages.Bio <- list.of.packages.Bio[!(list.of.packages.Bio %in% installed.packages()[, "Package"])]
+#install required packages
+if(length(new.packages)) {install.packages(new.packages)}
+if (!requireNamespace("BiocManager", quietly = TRUE)){install.packages("BiocManager")}
+if(length(new.packages.Bio)) {BiocManager::install(new.packages.Bio)}
+#How to install the C++ Boost Libraries on Windows
+#https://andres.jaimes.net/718/how-to-install-the-c-boost-libraries-on-windows/
+#if (!require(velocyto)) devtools::install_github("velocyto-team/velocyto.R")
+#Loading all packages
+invisible(lapply(c(list.of.packages,list.of.packages.Bio), library, character.only = TRUE))
+rm(list.of.packages,list.of.packages.Bio,new.packages,new.packages.Bio)
+```
+
+### 2.Loading FCS files and label
+
+```{r}
+# Please set up "pattern" and "subset.CoNa"
+pattern<-c("^CRL.*\\.fcs$", "^Negative_.*\\.fcs$")
+subset.CoNa<-list(
+  c("Time","HDR.CE","HDR.SE","HDR.V","FSC.A","SSC.A","FL4.A","FL7.A"),
+  c("HDR.T","HDR.CE","HDR.SE","HDR.V","FSC.A","SSC.A","B2.A","R1.A")
+)
+
+for(i in 1:length(pattern)){
+  if(i==1){
+    fs <- read.flowSet(
+      path = ".",
+      pattern = pattern[i],
+      alter.names = T,
+      emptyValue=FALSE,
+      truncate_max_range = FALSE,
+      column.pattern="[^W]$")
+    fs <- fs[,subset.CoNa[[i]]]
+  }else{
+    temp <- read.flowSet(
+      path = ".",
+      pattern = pattern[i],
+      alter.names = T,
+      transformation="scale",
+      decades=1,
+      emptyValue=FALSE,
+      truncate_max_range = FALSE,
+      column.pattern="[^W]$")
+    temp <- temp[,subset.CoNa[[i]]]
+    colnames(temp)<-colnames(fs)
+    markernames(temp)<-markernames(fs)
+    temp2 <- read.flowSet(
+      path = ".",
+      pattern = pattern[i],
+      alter.names = T,
+      emptyValue=FALSE,
+      truncate_max_range = FALSE,
+      column.pattern="[^W]$")
+    temp2 <- temp2[,subset.CoNa[[i]]]
+    colnames(temp2)<-colnames(fs)
+    markernames(temp2)<-markernames(fs)
+    for (j in 1:length(temp2)) {
+      temp[[j]]@exprs[,2:6]<-temp2[[j]]@exprs[,2:6]
+    }
+    fs<-rbind2(fs,temp)
+  }
+}
+
+for (i in 1:length(fs)) {
+  for(k in 1:length(subset.CoNa[[1]])){
+    fs[[i]]@exprs[,k][fs[[i]]@exprs[,k]==-Inf]<-min(fs[[i]]@exprs[,k][fs[[i]]@exprs[,k]>-Inf],na.rm = TRUE)
+    fs[[i]]@exprs[,k][fs[[i]]@exprs[,k]==Inf]<-max(fs[[i]]@exprs[,k][fs[[i]]@exprs[,k]<Inf],na.rm = TRUE)
+  }
+}
+
+pData(fs)
+pData(fs)$well <- lapply(str_split(sampleNames(fs), "[_.]"),"[[",2)%>%unlist() # extract well from name and add new 'well' column
+pData(fs)
+
+summary(fs)
+```
+
+### 3.Basic Information
+
+```{r}
+lapply(colnames(fs),getChannelMarker, frm=flowSet_to_list(fs)[[1]])%>%
+  rbindlist()%>%as.data.frame()
+```
+
+### 3.Grouping and Naming
+
+```{r}
+pData(fs)$well<-factor(
+  c(
+    "Unlabeled Hb", "Hb-FL", "Hb-FL +Hp: 0.0001uM", "Hb-FL +Hp: 0.001uM", "Hb-FL +Hp: 0.01uM", "Hb-FL +Hp: 0.1uM", "Hb-FL +Hp: 1uM", "Hb-FL +Hp: 10uM",
+  "Hb -FL", "Hb -FL +Hp: 1uM", "Hb -FL +Hp: 1uM +HMGB1: 0.1ug/ml", "Hb -FL +Hp: 1uM +HMGB1: 0.5ug/ml", "Hb -FL +Hp: 1uM +HMGB1: 1ug/ml", "Hb -FL +Hp: 1uM +HMGB1: 2ug/ml", "Hb -FL +Hp: 1uM +HMGB1: 5ug/ml", "Hb -FL +Hp: 1uM +HMGB1: 10ug/ml",
+   "Unlabeled HMGB1", "HMGB1-FL", "HMGB1-FL +Hp: 1uM", "HMGB1-FL +Hp: 5uM", "HMGB1-FL +Hp: 10uM", "PBS", "Unlabled"
+  ),
+  levels = c(
+    "Unlabeled Hb", "Hb-FL", "Hb-FL +Hp: 0.0001uM", "Hb-FL +Hp: 0.001uM", "Hb-FL +Hp: 0.01uM", "Hb-FL +Hp: 0.1uM", "Hb-FL +Hp: 1uM", "Hb-FL +Hp: 10uM",
+    "Unlabeled HMGB1", "HMGB1-FL", "HMGB1-FL +Hp: 1uM", "HMGB1-FL +Hp: 5uM", "HMGB1-FL +Hp: 10uM",
+    "Hb -FL", "Hb -FL +Hp: 1uM", "Hb -FL +Hp: 1uM +HMGB1: 0.1ug/ml", "Hb -FL +Hp: 1uM +HMGB1: 0.5ug/ml", "Hb -FL +Hp: 1uM +HMGB1: 1ug/ml", "Hb -FL +Hp: 1uM +HMGB1: 2ug/ml", "Hb -FL +Hp: 1uM +HMGB1: 5ug/ml", "Hb -FL +Hp: 1uM +HMGB1: 10ug/ml", "PBS", "Unlabled"
+  )
+)
+pData(fs)$order<-sprintf("%03d", c(2:9,10:17,18:22,1,23))%>%as.character()
+pData(fs)
+```
+
+## 01.Set Debris Gate {.tabset .tabset-fade}
+
+### Processing
+
+Convert data format
+
+```{r}
+colnames(fs)
+gs <- GatingSet(fs)
+pData(gs)$order<-pData(fs)$order
+ID_mapping<-pData(gs)$well
+names(ID_mapping)<-pData(gs)$orde
+x_label<-"CD163"
+y_label<-"Hb"
+```
+
+Get auto gate setting
+
+```{r}
+groups<-list(
+  c(1:8),
+  c(9:16),
+  c(17:21),
+  c(22:23)
+)
+groupNa<-c("G1","G2","G3","G4")
+g.debris.ls<-list()
+gp<-list()
+target<-list(
+  c(375,375),
+  c(250,375),
+  c(375,375),
+  c(250,175)
+)
+quantile<-c(0.65,0.65,0.65,0.65)
+for(i in 1:length(groups)){
+  ff<-gh_pop_get_data(gs[[groups[[i]][1]]], y="root", returnType="flowFrame")
+  for (k in groups[[i]][-1]) {
+    temp<-gh_pop_get_data(gs[[k]], y="root", returnType="flowFrame")
+    ff@exprs<-rbind(
+      ff@exprs, temp@exprs
+    )
+  }
+  chnl <- c("FSC.A", "SSC.A")
+  
+  g.debris <- openCyto:::.flowClust.2d(ff, channels = chnl, K=3,  target=target[[i]], quantile=0.85, filterId = "Debris")
+  g.debris@filterId<-paste0("No Debris"," (",groupNa[i],")")
+  rm(ff)
+  
+  g.debris.ls[[i]]<-g.debris
+  
+  for(k in 1:length(groups[[i]])){
+    gp[[groups[[i]][k]]]<-ggcyto(gs[[groups[[i]][k]]], aes(x=FSC.A, y=SSC.A), subset="root")+
+      geom_hex(bins = 1000)+
+      geom_gate(g.debris.ls[[i]])+
+      geom_stats(adjust = 0.8)+
+      ggcyto_par_set(limits = "instrument")+
+      theme_bw()+
+      xlab("FSC-A") + ylab("SSC-A")
+  }
+  
+}
+```
+
+Let's check the auto gate setting
+
+```{r, fig.width=5, fig.height=4}
+for(i in 1:length(gp)){
+  gp[[i]]%>%plot()
+}
+```
+
+Recompute if you confirmed the results above
+
+```{r}
+for(i in 1:length(groups)){
+  gs_pop_add(gs, g.debris.ls[[i]], parent="root")
+  recompute(gs)
+}
+```
+
+## 02 Set Fluoresence Gate
+
+### 02-01 Overview
+
+```{r}
+gp<-list()
+
+for(i in 1:length(groups)){
+  
+  for(k in 1:length(groups[[i]])){
+    gp[[groups[[i]][k]]]<-ggcyto(gs[[groups[[i]][k]]], aes(x=FL4.A,y=FL7.A), subset=paste0("No Debris"," (",groupNa[i],")"))+
+      geom_hex(bins = 25)+
+      scale_x_log10(
+        breaks = scales::trans_breaks("log10", function(x) 10^x),
+        labels = scales::trans_format("log10", scales::math_format(10^.x))
+      ) +
+      scale_y_log10(
+        breaks = scales::trans_breaks("log10", function(x) 10^x),
+        labels = scales::trans_format("log10", scales::math_format(10^.x))
+      )+
+      coord_cartesian(xlim = c(1e-2,1e3), ylim = c(1e-2,1e4))+
+      theme_bw()+
+      theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+      annotation_logticks()+
+      xlab(x_label) + ylab(y_label)
+      
+  }
+  
+}
+```
+
+
+```{r fig.width=5, fig.height=4, results='hide', message=FALSE, warning=FALSE, fig.show='asis'}
+for(i in 1:length(gp)){
+  gp[[i]]%>%plot()
+}
+```
+
+### 02-02 Processing {.tabset .tabset-fade}
+
+#### Set Red Gate {.tabset .tabset-fade .tabset-dropdown}
+
+##### 1.Gatting Value
+Get the gating value from the density plot
+
+```{r}
+fr <- gh_pop_get_data(gs[[22]], y="No Debris (G4)", returnType = "flowFrame")
+cut<-fr@exprs[,"FL7.A"]%>%quantile(.,1)
+cut
+```
+
+##### 2.Gating Check
+
+```{r fig.width=5, fig.height=4, results='hide', message=FALSE, warning=FALSE, fig.show='asis'}
+g.red <- rectangleGate(filterId="Red Positive", "FL7.A"=c(cut, Inf)) # set gate
+
+gp<-list()
+
+for(i in 1:length(groups)){
+  
+  for(k in 1:length(groups[[i]])){
+    gp[[groups[[i]][k]]]<-ggcyto(gs[[groups[[i]][k]]], aes(x=FL4.A,y=FL7.A), subset=paste0("No Debris"," (",groupNa[i],")"))+
+      geom_hex(bins = 25)+
+      geom_gate(g.red)+
+      scale_x_log10(
+        breaks = scales::trans_breaks("log10", function(x) 10^x),
+        labels = scales::trans_format("log10", scales::math_format(10^.x))
+      ) +
+      scale_y_log10(
+        breaks = scales::trans_breaks("log10", function(x) 10^x),
+        labels = scales::trans_format("log10", scales::math_format(10^.x))
+      )+
+      coord_cartesian(xlim = c(1e-2,1e3), ylim = c(1e-2,1e4))+
+      theme_bw()+
+      theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+      annotation_logticks()+
+      xlab(x_label) + ylab(y_label)
+      
+  }
+  
+}
+
+
+for(i in 1:length(gp)){
+  gp[[i]]%>%plot()
+}
+
+```
+
+#### Set PI Gate {.tabset .tabset-fade .tabset-dropdown}
+
+##### 1.Gatting Value
+Get the gating value from the density plot
+
+```{r}
+fr <- gh_pop_get_data(gs[[22]], y="No Debris (G4)", returnType = "flowFrame")
+cut<-fr@exprs[,"FL4.A"]%>%quantile(.,1)
+cut
+```
+
+##### 3.Gatting Check
+
+```{r fig.width=6, fig.height=4, results='hide', message=FALSE, warning=FALSE, fig.show='asis'}
+g.PI <- rectangleGate(filterId="PI Positive", "FL4.A"=c(cut, Inf)) # set gate
+
+gp<-list()
+
+for(i in 1:length(groups)){
+  
+  for(k in 1:length(groups[[i]])){
+    gp[[groups[[i]][k]]]<-ggcyto(gs[[groups[[i]][k]]], aes(x=FL4.A,y=FL7.A), subset=paste0("No Debris"," (",groupNa[i],")"))+
+      geom_hex(bins = 25)+
+      geom_gate(g.PI)+
+      scale_x_log10(
+        breaks = scales::trans_breaks("log10", function(x) 10^x),
+        labels = scales::trans_format("log10", scales::math_format(10^.x))
+      ) +
+      scale_y_log10(
+        breaks = scales::trans_breaks("log10", function(x) 10^x),
+        labels = scales::trans_format("log10", scales::math_format(10^.x))
+      )+
+      coord_cartesian(xlim = c(1e-2,1e3), ylim = c(1e-2,1e4))+
+      theme_bw()+
+      theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+      annotation_logticks()+
+      xlab(x_label) + ylab(y_label)
+      
+  }
+  
+}
+
+for(i in 1:length(gp)){
+  gp[[i]]%>%plot()
+}
+```
+
+### 02-03 Red/PI Gate Combination {.tabset .tabset-fade}
+
+#### Recompute
+
+```{r}
+PI.P_Red.P<-rectangleGate(filterId="PI+ Red+", "FL4.A"=c(g.PI@min, Inf), "FL7.A"=c(g.red@min, Inf))
+PI.N_Red.N<-rectangleGate(filterId="PI- Red-", "FL4.A"=c(-Inf, g.PI@min), "FL7.A"=c(-Inf, g.red@min))
+PI.P_Red.N<-rectangleGate(filterId="PI+ Red-", "FL4.A"=c(g.PI@min, Inf), "FL7.A"=c(-Inf, g.red@min))
+PI.N_Red.P<-rectangleGate(filterId="PI- Red+", "FL4.A"=c(-Inf, g.PI@min), "FL7.A"=c(g.red@min, Inf))
+
+for(i in 1:length(groups)){
+  gs_pop_add(gs, PI.P_Red.P, parent=paste0("No Debris"," (",groupNa[i],")"))
+  recompute(gs)
+  gs_pop_add(gs, PI.N_Red.N, parent=paste0("No Debris"," (",groupNa[i],")"))
+  recompute(gs)
+  gs_pop_add(gs, PI.P_Red.N, parent=paste0("No Debris"," (",groupNa[i],")"))
+  recompute(gs)
+  gs_pop_add(gs, PI.N_Red.P, parent=paste0("No Debris"," (",groupNa[i],")"))
+  recompute(gs)
+}
+```
+
+#### Plot Out
+
+```{r fig.width=6, fig.height=4, results='hide', message=FALSE, warning=FALSE, fig.show='asis', echo=FALSE}
+gp<-list()
+
+for(i in 1:length(groups)){
+  
+  for(k in 1:length(groups[[i]])){
+    gp[[groups[[i]][k]]]<-ggcyto(gs[[groups[[i]][k]]], aes(x=FL4.A,y=FL7.A), subset=paste0("No Debris"," (",groupNa[i],")"))+
+      geom_hex(bins = 25)+
+      geom_gate(PI.P_Red.P)+
+      geom_gate(PI.N_Red.N)+
+      geom_gate(PI.P_Red.N)+
+      geom_gate(PI.N_Red.P)+
+      geom_stats(adjust = 0.2)+
+      geom_hline(yintercept=g.red@min[["FL7.A"]], linetype="dotted", 
+                color = "red", size=1)+
+      geom_vline(xintercept = g.PI@min[["FL4.A"]], linetype="dotted", 
+                color = "red", size=1)+
+      scale_x_log10(
+        breaks = scales::trans_breaks("log10", function(x) 10^x),
+        labels = scales::trans_format("log10", scales::math_format(10^.x))
+      ) +
+      scale_y_log10(
+        breaks = scales::trans_breaks("log10", function(x) 10^x),
+        labels = scales::trans_format("log10", scales::math_format(10^.x))
+      )+
+      coord_cartesian(xlim = c(1e-2,1e3), ylim = c(1e-2,1e4))+
+      theme_bw()+
+      theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+      annotation_logticks()+
+      xlab(x_label) + ylab(y_label)
+    
+  }
+  
+}
+
+for(i in 1:length(gp)){
+  gp[[i]]%>%plot()
+}
+
+```
+
+#### Table Out
+
+```{r message=FALSE, warning=FALSE, fig.show='hide', echo=FALSE, results='hide'}
+#====|Generating HTML report|====####
+list.of.packages <- c("htmltools","htmlTable","magrittr","xml2","dplyr","plotly","hwriter")
+#Packages that does not install yet
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[, "Package"])]
+#install required packages
+if(length(new.packages)) {install.packages(new.packages)}
+if(!require(spMisc)){remotes::install_github("GegznaV/spMisc")}
+#Loading all packages
+invisible(lapply(c(list.of.packages,list.of.packages), library, character.only = TRUE))
+temp<-as.data.frame(gs_pop_get_count_fast(gs))
+temp0<-as.data.frame(pData(gs))
+temp0[temp$name,"well"]
+temp<-cbind(
+  Label=temp0[temp$name,"well"],
+  temp
+)
+tableID<-"CountFast"
+colnm<-colnames(temp)
+TableResHTML.head<-hmakeTag('th',colnm,
+                            style="font-weight: 900; border-bottom: 1px solid grey; border-top: 2px solid grey; text-align: center;"
+)%>%
+  paste(.,collapse="")%>%
+  hmakeTag('tr',.)%>%hmakeTag('thead',.)
+
+TableResHTML.body<-temp%>%
+  hwrite(.,row.names=FALSE,col.names=FALSE,br=TRUE)%>%
+  HTML()%>%read_html()%>%
+  xml_find_all(.,".//tr")%>%as.character()%>%paste(.,collapse="")%>%
+  hmakeTag('tbody',.)
+
+TableResHTML<-hmakeTag('table',paste0(TableResHTML.head,TableResHTML.body))%>%
+  HTML()%>%read_html()%>%xml_find_all(.,".//table")
+
+xml_set_attrs(TableResHTML[[1]], c("id"=tableID, "cellpadding"="0"))
+JS_HTML_src<-hmakeTag('script', src='./tablefilter/tablefilter.js')
+JS_HTML<-hmakeTag(
+  'script', id='data-config',
+  data = paste0(
+    "
+    var filtersConfig = {
+        base_path: 'tablefilter/',
+        paging: {
+         results_per_page: ['Records: ', [10, 25, 50, 100]]
+       },
+        col_0: 'select',
+        col_1: 'select',
+        col_2: 'select',
+        col_3: 'select',
+        popup_filters: true,
+        alternate_rows: true,
+        rows_counter: true,
+        btn_reset: true,
+        loader: true,
+        status_bar: true,
+        mark_active_columns: true,
+        highlight_keywords: true,
+        col_types: [
+            'string', 'string', 'string',
+            'string', 'number', 'number'
+        ],
+        custom_options: {
+            cols:[4],
+            sorts: [false]
+        },
+        extensions:[{
+          name: 'sort'
+        }]
+    };
+
+    var tf = new TableFilter('CountFast', filtersConfig);
+    tf.init();
+    "
+  )
+)
+Body_HTML<-hmakeTag('body',paste0(TableResHTML,JS_HTML_src,JS_HTML))%>%
+  HTML()%>%read_html()%>%xml_find_all(.,".//body")
+
+as.character(Body_HTML)%>%HTML()
+```
+
+Below is the gating hierarchy structure
+
+```{r fig.width=12, fig.height=7, results='hide', message=FALSE, warning=FALSE, fig.show='asis', echo=FALSE}
+plot(gs, bool=TRUE)
+```
+
+## 03 Statics
+
+### 03-01 Correlation Analysis {.tabset .tabset-fade}
+
+#### Plot Out
+
+```{r fig.width=9, fig.height=6, results='hide', message=FALSE, warning=FALSE, fig.show='asis', echo=FALSE}
+library(gridExtra)
+library(ggpubr)
+library(plotrix)
+
+LsOrder<-c(1:8,9:16,17:21)
+gp <- list()
+y1=c(150,150,150,50,175,150,150,150,150,150,150,150,150,150,150)
+y2=c(125,125,125,25,150,125,125,125,125,125,125,125,125,125,125)
+x0=c(7.5,125,125,300,50,200,50,200,200,100,3,50,50,200,200)
+Label<-c()
+CellP<-c()
+Red_Mean<-c()
+Red_SD<-c()
+Red_SEM<-c()
+PI_Mean<-c()
+PI_SD<-c()
+PI_SEM<-c()
+Intercept<-c()
+Slope<-c()
+R2<-c()
+PR<-c()
+PP<-c()
+SR<-c()
+SP<-c()
+
+
+for(i in 1:length(groups)){
+  
+  for(k in groups[[i]]){
+    
+    temp<-gh_pop_get_data(gs[[k]], paste0("No Debris"," (",groupNa[i],")", "/PI+ Red+"), returnType = "flowFrame")
+    temp<-data.frame(
+      "FL4.A"=temp@exprs[,"FL4.A"],
+      "FL7.A"=temp@exprs[,"FL7.A"]
+    )
+    
+    percentage<-gh_pop_get_data(gs[[k]], paste0("No Debris"," (",groupNa[i],")"), returnType = "flowFrame")
+    percentage<-round(nrow(temp)/nrow(percentage)*100,3)
+    
+    
+    if(nrow(temp)>2){
+      lm.out<-lm(FL7.A~FL4.A, temp)
+      pearson.out<-cor.test(temp$FL7.A, temp$FL4.A, method="pearson")
+      spearman.out<-cor.test(temp$FL7.A, temp$FL4.A, method="spearman")
+      
+      #str(summary(lm.out))
+      #str(summary(pearson.out))
+      #str(summary(spearman.out))
+      Intercept<-c(
+        Intercept,
+        summary(lm.out)$coefficients[1,1] # Intercept
+      )
+      Slope<-c(
+        Slope,
+        summary(lm.out)$coefficients[2,1] # Slope
+      )
+      R2<-c(
+        R2,
+        summary(lm.out)$r.squared # R^2
+      )
+      PR<-c(
+        PR,
+        pearson.out$estimate # pearson Rho
+      )
+      PP<-c(
+        PP,
+        pearson.out$p.value # pearson P-value
+      )
+      SR<-c(
+        SR,
+        spearman.out$estimate # spearman Rho
+      )
+      SP<-c(
+        SP,
+        spearman.out$p.value # spearman P-value
+      )
+    }else{
+      Intercept<-c(
+        Intercept,
+        "NA" # Intercept
+      )
+      Slope<-c(
+        Slope,
+        "NA" # Slope
+      )
+      R2<-c(
+        R2,
+        "NA" # R^2
+      )
+      PR<-c(
+        PR,
+        "NA" # pearson Rho
+      )
+      PP<-c(
+        PP,
+        "NA" # pearson P-value
+      )
+      SR<-c(
+        SR,
+        "NA" # spearman Rho
+      )
+      SP<-c(
+        SP,
+        "NA" # spearman P-value
+      )
+    }
+    
+    Label<-c(
+      Label,
+      pData(gs)$well[k]
+    )
+    CellP<-c(
+      CellP,
+      percentage
+    )
+    Red_Mean<-c(
+      Red_Mean,
+      median(temp$FL7.A)
+    )
+    Red_SD<-c(
+      Red_SD,
+      sd(temp$FL7.A)
+    )
+    Red_SEM<-c(
+      Red_SEM,
+      std.error(temp$FL7.A)
+    )
+    PI_Mean<-c(
+      PI_Mean,
+      median(temp$FL4.A)
+    )
+    PI_SD<-c(
+      PI_SD,
+      sd(temp$FL4.A)
+    )
+    PI_SEM<-c(
+      PI_SEM,
+      std.error(temp$FL4.A)
+    )
+    
+  }
+  
+}
+```
+
+#### Table Out
+
+```{r message=FALSE, warning=FALSE, fig.show='hide', echo=FALSE, results='hide'}
+library(openxlsx)
+
+res.out<-data.frame(
+  Label=Label,
+  CellP=CellP,
+  Red_Mean=Red_Mean,
+  Red_SD=Red_SD,
+  Red_SEM=Red_SEM,
+  PI_Mean=PI_Mean,
+  PI_SD=PI_SD,
+  PI_SEM=PI_SEM,
+  Intercept=Intercept,
+  Slope=Slope,
+  R2=R2,
+  PR=PR,
+  PP=PP,
+  SR=SR,
+  SP=SP
+)
+
+xlsx.res.out<-createWorkbook()
+
+addWorksheet(xlsx.res.out, "FlowRes")
+writeDataTable(xlsx.res.out, "FlowRes", res.out, startCol = 1, startRow = 1)
+
+saveWorkbook(
+  xlsx.res.out, 
+  file = "00.Results.xlsx",
+  overwrite = TRUE
+)
+
+temp<-res.out
+tableID<-"ResOut"
+colnm<-colnames(temp)
+TableResHTML.head<-hmakeTag('th',colnm,
+                            style="font-weight: 900; border-bottom: 1px solid grey; border-top: 2px solid grey; text-align: center;"
+)%>%
+  paste(.,collapse="")%>%
+  hmakeTag('tr',.)%>%hmakeTag('thead',.)
+
+TableResHTML.body<-temp%>%
+  hwrite(.,row.names=FALSE,col.names=FALSE,br=TRUE)%>%
+  HTML()%>%read_html()%>%
+  xml_find_all(.,".//tr")%>%as.character()%>%paste(.,collapse="")%>%
+  hmakeTag('tbody',.)
+
+TableResHTML<-hmakeTag('table',paste0(TableResHTML.head,TableResHTML.body))%>%
+  HTML()%>%read_html()%>%xml_find_all(.,".//table")
+
+xml_set_attrs(TableResHTML[[1]], c("id"=tableID, "cellpadding"="0"))
+JS_HTML_src<-hmakeTag('script', src='./tablefilter/tablefilter.js')
+JS_HTML<-hmakeTag(
+  'script', id='data-config',
+  data = paste0(
+    "
+    var filtersConfig = {
+        base_path: 'tablefilter/',
+        paging: {
+         results_per_page: ['Records: ', [10, 25, 50, 100]]
+       },
+        popup_filters: true,
+        alternate_rows: true,
+        rows_counter: true,
+        btn_reset: true,
+        loader: true,
+        status_bar: true,
+        mark_active_columns: true,
+        highlight_keywords: true,
+        col_types: [
+            'string', 'number', 'number', 'number', 'number',
+            'number', 'number', 'number', 'number', 'number',
+            'number', 'number', 'number', 'number', 'number'
+        ],
+        custom_options: {
+            sorts: [true]
+        },
+        extensions:[{
+          name: 'sort'
+        }]
+    };
+
+    var tf = new TableFilter('ResOut', filtersConfig);
+    tf.init();
+    "
+  )
+)
+Body_HTML<-hmakeTag('body',paste0(TableResHTML,JS_HTML_src,JS_HTML))%>%
+  HTML()%>%read_html()%>%xml_find_all(.,".//body")
+
+as.character(Body_HTML)%>%HTML()
+
+```
+
+**Note:**
+
+  * **Label**: Experiment treatment;
+  * **CellP**: Cell Percentage (%);
+  * **Red_Mean**: Averaged area of Alexa 633 channel;
+  * **Red_SD**: Standard deviation of Red_Mean;
+  * **Red_SEM**: Standard error of Red_Mean;
+  * **PI_Mean**: Averaged area of PE/PI channel;
+  * **PI_SD**: Standard deviation of PI_Mean;
+  * **PI_SEM**: Standard error of PI_Mean;
+  * **Intercept**: The Intercept of the fitted line;
+  * **Slope**: The Slope of the fitted line;
+  * **R2**: The R square of the fitted line;
+  * **PR**: Pearson's Rho;
+  * **PP**: The P-value of Pearson's Rho;
+  * **SR**: Spearman's Rho;
+  * **SP**: The P-value of Spearman's Rho.
+
+<script src="http://kit.fontawesome.com/46057cf47a.js" crossorigin="anonymous"></script>
+<script src="./HTML_source/script.js"></script>
